@@ -28,6 +28,7 @@ description:
 notes:
   - To create a new runner at least the C(api_token), C(description) and C(api_url) options are required.
   - Runners need to have unique descriptions.
+  - Since Ansible 2.10 C(identifier) is used to segregate the runner instead of C(description)
 version_added: 2.8
 author:
   - Samy Coenen (@SamyCoenen)
@@ -43,10 +44,19 @@ options:
       - Your private token to interact with the GitLab API.
     required: True
     type: str
+  identifier:
+    version_added: "2.10"
+    description:
+      - Unique string to identify runner
+      - A tag is created with that identifier, prefixed by "ansible_id"
+    required: True
+    type: str
+    aliases:
+      - name
   description:
     description:
-      - The unique name of the runner.
-    required: True
+      - The name of the runner.
+    required: False
     type: str
     aliases:
       - name
@@ -174,33 +184,35 @@ class GitLabRunner(object):
         self._gitlab = gitlab_instance
         self.runnerObject = None
 
-    def createOrUpdateRunner(self, description, options):
+    def createOrUpdateRunner(self, identifier, options):
         changed = False
 
         # Because we have already call userExists in main()
         if self.runnerObject is None:
             runner = self.createRunner({
-                'description': description,
+                'description': options['description'],
                 'active': options['active'],
                 'token': options['registration_token'],
                 'locked': options['locked'],
                 'run_untagged': options['run_untagged'],
                 'maximum_timeout': options['maximum_timeout'],
-                'tag_list': options['tag_list']})
+                'access_level': options['access_level'],
+                'tag_list': options['tag_list'] + [identifier]})
             changed = True
         else:
             changed, runner = self.updateRunner(self.runnerObject, {
+                'description': options['description'],
                 'active': options['active'],
                 'locked': options['locked'],
                 'run_untagged': options['run_untagged'],
                 'maximum_timeout': options['maximum_timeout'],
                 'access_level': options['access_level'],
-                'tag_list': options['tag_list']})
+                'tag_list': options['tag_list'] + [identifier]})
 
         self.runnerObject = runner
         if changed:
             if self._module.check_mode:
-                self._module.exit_json(changed=True, msg="Successfully created or updated the runner %s" % description)
+                self._module.exit_json(changed=True, msg="Successfully created or updated the runner %s" % identifier)
 
             try:
                 runner.save()
@@ -251,11 +263,13 @@ class GitLabRunner(object):
     '''
     @param description Description of the runner
     '''
-    def findRunner(self, description):
-        runners = self._gitlab.runners.all(as_list=False)
+    def findRunner(self, identifier):
+        runners = self._gitlab.runners.all(as_list=False, tag_list=identifier)
         for runner in runners:
-            if (runner['description'] == description):
-                return self._gitlab.runners.get(runner['id'])
+            r = self._gitlab.runners.get(runner['id'])
+            if (identifier in r.tag_list):
+                return r
+        return None
 
     '''
     @param description Description of the runner
@@ -282,7 +296,8 @@ def main():
     argument_spec = basic_auth_argument_spec()
     argument_spec.update(dict(
         api_token=dict(type='str', no_log=True),
-        description=dict(type='str', required=True, aliases=["name"]),
+        identifier=dict(type='str', required=True),
+        description=dict(type='str', aliases=["name"]),
         active=dict(type='bool', default=True),
         tag_list=dict(type='list', default=[]),
         run_untagged=dict(type='bool', default=True),
@@ -317,6 +332,7 @@ def main():
     access_level = module.params['access_level']
     maximum_timeout = module.params['maximum_timeout']
     registration_token = module.params['registration_token']
+    identifier = "ansible_id " + module.params['identifier']
 
     if not HAS_GITLAB_PACKAGE:
         module.fail_json(msg=missing_required_lib("python-gitlab"), exception=GITLAB_IMP_ERR)
@@ -324,17 +340,18 @@ def main():
     gitlab_instance = gitlabAuthentication(module)
 
     gitlab_runner = GitLabRunner(module, gitlab_instance)
-    runner_exists = gitlab_runner.existsRunner(runner_description)
+    runner_exists = gitlab_runner.existsRunner(identifier)
 
     if state == 'absent':
         if runner_exists:
             gitlab_runner.deleteRunner()
-            module.exit_json(changed=True, msg="Successfully deleted runner %s" % runner_description)
+            module.exit_json(changed=True, msg="Successfully deleted runner %s" % identifier)
         else:
             module.exit_json(changed=False, msg="Runner deleted or does not exists")
 
     if state == 'present':
-        if gitlab_runner.createOrUpdateRunner(runner_description, {
+        if gitlab_runner.createOrUpdateRunner(identifier, {
+                                              "description": runner_description,
                                               "active": runner_active,
                                               "tag_list": tag_list,
                                               "run_untagged": run_untagged,
